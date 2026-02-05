@@ -28,6 +28,31 @@ def prepare_actions_for_maniskill(
 ) -> torch.Tensor:
     if "panda" in policy:
         return raw_chunk_actions
+    if "aloha" in policy:
+        # We keep the policy action space small (e.g., 6D left-arm joint delta),
+        # and pad it to ManiSkill's expected composite controller action space.
+        #
+        # For AlohaMiniSO100V2 with `control_mode="pd_joint_delta_pos"` the action
+        # is typically concatenated as:
+        #   base(3) + lift(1) + left_arm(6) + right_arm(6) = 16
+        # We only control the left_arm part and keep others fixed (zero delta).
+        import numpy as np
+
+        if policy in ["aloha_left_arm_joint_dpos", "aloha_leftarm_joint_dpos", "aloha_left_arm"]:
+            target_env_action_dim = 16
+            if action_dim == target_env_action_dim:
+                return raw_chunk_actions
+            if action_dim != 6:
+                raise ValueError(
+                    f"Aloha left-arm mapping expects action_dim=6 (left_arm joints), got {action_dim}"
+                )
+            out = np.zeros(raw_chunk_actions.shape[:-1] + (target_env_action_dim,), dtype=raw_chunk_actions.dtype)
+            # indices: base(0:3), lift(3), left_arm(4:10), right_arm(10:16)
+            out[..., 4:10] = raw_chunk_actions
+            return out
+
+        # If user directly trains 16D, do nothing.
+        return raw_chunk_actions
     # TODO only suitable for action_dim = 7
     reshaped_actions = raw_chunk_actions.reshape(-1, action_dim)
     batch_size = reshaped_actions.shape[0]

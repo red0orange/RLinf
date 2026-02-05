@@ -1,0 +1,619 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <title>AlohaMini VR Teleop + Camera</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://aframe.io/releases/1.7.1/aframe.min.js"></script>
+    <style>
+        body { margin: 0; background: #1a1a2e; color: #fff; font-family: sans-serif; }
+        #desktop-ui {
+            position: fixed; top: 10px; left: 10px; z-index: 100;
+            background: rgba(0,0,0,0.8); padding: 15px; border-radius: 8px;
+            max-width: 350px;
+        }
+        #desktop-ui h2 { color: #00d4ff; margin: 0 0 10px 0; }
+        #status { padding: 5px 10px; border-radius: 4px; margin-bottom: 10px; display: inline-block; }
+        .connected { background: #2ecc71; }
+        .disconnected { background: #e74c3c; }
+        .connecting { background: #f39c12; }
+        .camera-row { display: flex; gap: 5px; margin-top: 10px; }
+        #camera-preview {
+            width: 200px; height: 150px; border: 2px solid #00d4ff;
+            background: #000; display: block;
+        }
+        .wrist-preview {
+            width: 80px; height: 60px; border: 1px solid #888;
+            background: #000; display: block;
+        }
+        .wrist-container { display: flex; flex-direction: column; gap: 5px; }
+        .wrist-label { font-size: 10px; color: #888; text-align: center; }
+        .info { font-size: 12px; color: #aaa; margin-top: 10px; line-height: 1.6; }
+        #enter-vr-btn {
+            margin-top: 15px; padding: 15px 30px; font-size: 18px;
+            background: #00d4ff; border: none; border-radius: 8px;
+            cursor: pointer; color: #000; font-weight: bold; width: 100%;
+        }
+        #enter-vr-btn:hover { background: #00b8e6; }
+        #enter-vr-btn:disabled { background: #666; cursor: not-allowed; }
+        #debug-info { font-size: 11px; color: #888; margin-top: 8px; }
+        /* Hidden canvases for textures */
+        .hidden-canvas { display: none; }
+    </style>
+</head>
+<body>
+    <!-- Hidden canvases for camera textures -->
+    <canvas id="texture-canvas-main" class="hidden-canvas" width="640" height="480"></canvas>
+    <canvas id="texture-canvas-left" class="hidden-canvas" width="320" height="240"></canvas>
+    <canvas id="texture-canvas-right" class="hidden-canvas" width="320" height="240"></canvas>
+
+    <div id="desktop-ui">
+        <h2>AlohaMini VR + Camera</h2>
+        <div id="status" class="connecting">Connecting...</div>
+        <div class="camera-row">
+            <img id="camera-preview" alt="Main Camera" crossorigin="anonymous">
+            <div class="wrist-container">
+                <div>
+                    <div class="wrist-label">Left Wrist</div>
+                    <img id="wrist-left-preview" class="wrist-preview" alt="Left Wrist" crossorigin="anonymous">
+                </div>
+                <div>
+                    <div class="wrist-label">Right Wrist</div>
+                    <img id="wrist-right-preview" class="wrist-preview" alt="Right Wrist" crossorigin="anonymous">
+                </div>
+            </div>
+        </div>
+        <div class="info">
+            <b>Controls:</b><br>
+            Grip (hold): Track arm position<br>
+            Trigger: Open/close gripper<br>
+            Left Stick: Move base<br>
+            A/B: Lift up/down
+        </div>
+        <button id="enter-vr-btn">Enter VR Mode</button>
+        <div id="debug-info">Controllers: waiting...</div>
+    </div>
+
+    <a-scene vr-mode-ui="enabled: true" embedded
+             style="position: fixed; top: 0; left: 0; width: 100%; height: 100%;">
+
+        <!-- Main camera display fixed in front of headset (HUD style, center) -->
+        <a-entity id="cameraRig" camera look-controls>
+            <!-- Main camera screen (center, fixed to view) -->
+            <a-entity id="camera-screen-main" position="0 0 -0.8" rotation="0 0 0">
+                <a-plane id="camera-plane-main" width="0.5" height="0.375"
+                         material="shader: flat; side: double; color: #fff">
+                </a-plane>
+            </a-entity>
+        </a-entity>
+
+        <!-- VR Controllers with wrist camera displays above each -->
+        <a-entity id="leftHand" oculus-touch-controls="hand: left">
+            <!-- Left wrist camera above left controller -->
+            <a-entity id="camera-screen-left" position="0 0.12 -0.05" rotation="-30 0 0">
+                <a-plane id="camera-plane-left" width="0.12" height="0.09"
+                         material="shader: flat; side: double; color: #fff">
+                </a-plane>
+            </a-entity>
+        </a-entity>
+        <a-entity id="rightHand" oculus-touch-controls="hand: right">
+            <!-- Right wrist camera above right controller -->
+            <a-entity id="camera-screen-right" position="0 0.12 -0.05" rotation="-30 0 0">
+                <a-plane id="camera-plane-right" width="0.12" height="0.09"
+                         material="shader: flat; side: double; color: #fff">
+                </a-plane>
+            </a-entity>
+        </a-entity>
+
+        <!-- Simple environment -->
+        <a-sky color="#1a1a2e"></a-sky>
+        <a-plane rotation="-90 0 0" width="10" height="10" color="#222" position="0 0 0"></a-plane>
+    </a-scene>
+
+    <script>
+    // =====================================================
+    // A-Frame Component for VR Controller + Multi-Camera Streaming
+    // =====================================================
+    AFRAME.registerComponent('vr-teleop-stream', {
+        init: function() {
+            console.log('VR Teleop Stream component initialized');
+
+            // Get controller elements
+            this.leftHand = document.querySelector('#leftHand');
+            this.rightHand = document.querySelector('#rightHand');
+
+            // Get camera plane elements
+            this.cameraPlaneMain = document.querySelector('#camera-plane-main');
+            this.cameraPlaneLeft = document.querySelector('#camera-plane-left');
+            this.cameraPlaneRight = document.querySelector('#camera-plane-right');
+
+            // Get preview elements
+            this.cameraPreview = document.querySelector('#camera-preview');
+            this.wristLeftPreview = document.querySelector('#wrist-left-preview');
+            this.wristRightPreview = document.querySelector('#wrist-right-preview');
+
+            // Setup canvases for textures
+            this.canvasMain = document.getElementById('texture-canvas-main');
+            this.ctxMain = this.canvasMain.getContext('2d');
+            this.canvasLeft = document.getElementById('texture-canvas-left');
+            this.ctxLeft = this.canvasLeft.getContext('2d');
+            this.canvasRight = document.getElementById('texture-canvas-right');
+            this.ctxRight = this.canvasRight.getContext('2d');
+
+            // Three.js textures
+            this.textureMain = null;
+            this.textureLeft = null;
+            this.textureRight = null;
+
+            // Temp images for loading frames
+            this.tempImageMain = new Image();
+            this.tempImageMain.crossOrigin = 'anonymous';
+            this.tempImageLeft = new Image();
+            this.tempImageLeft.crossOrigin = 'anonymous';
+            this.tempImageRight = new Image();
+            this.tempImageRight.crossOrigin = 'anonymous';
+
+            // Image load handlers
+            this.tempImageMain.onload = () => {
+                this.ctxMain.drawImage(this.tempImageMain, 0, 0,
+                    this.canvasMain.width, this.canvasMain.height);
+                if (this.textureMain) this.textureMain.needsUpdate = true;
+            };
+            this.tempImageLeft.onload = () => {
+                this.ctxLeft.drawImage(this.tempImageLeft, 0, 0,
+                    this.canvasLeft.width, this.canvasLeft.height);
+                if (this.textureLeft) this.textureLeft.needsUpdate = true;
+            };
+            this.tempImageRight.onload = () => {
+                this.ctxRight.drawImage(this.tempImageRight, 0, 0,
+                    this.canvasRight.width, this.canvasRight.height);
+                if (this.textureRight) this.textureRight.needsUpdate = true;
+            };
+
+            // Controller state
+            this.leftGripDown = false;
+            this.rightGripDown = false;
+            this.leftTriggerDown = false;
+            this.rightTriggerDown = false;
+
+            // WebSocket
+            this.ws = null;
+            this.connectWebSocket();
+
+            // Setup controller events
+            this.setupControllerEvents();
+
+            // Setup textures after scene is ready
+            this.setupTextures();
+
+            // Frame counter for throttling
+            this.frameCount = 0;
+        },
+
+        setupTextures: function() {
+            // Setup texture for each camera plane
+            const setupSingleTexture = (plane, canvas, ctx, name) => {
+                return new Promise((resolve) => {
+                    const checkMesh = () => {
+                        if (!plane) { resolve(null); return; }
+                        const mesh = plane.getObject3D('mesh');
+                        if (mesh && mesh.material) {
+                            const texture = new THREE.CanvasTexture(canvas);
+                            texture.minFilter = THREE.LinearFilter;
+                            texture.magFilter = THREE.LinearFilter;
+                            mesh.material.map = texture;
+                            mesh.material.needsUpdate = true;
+
+                            // Draw placeholder
+                            ctx.fillStyle = '#333';
+                            ctx.fillRect(0, 0, canvas.width, canvas.height);
+                            ctx.fillStyle = '#666';
+                            ctx.font = '14px sans-serif';
+                            ctx.textAlign = 'center';
+                            ctx.fillText(name, canvas.width/2, canvas.height/2);
+                            texture.needsUpdate = true;
+
+                            console.log('Texture applied:', name);
+                            resolve(texture);
+                        } else {
+                            setTimeout(checkMesh, 100);
+                        }
+                    };
+                    checkMesh();
+                });
+            };
+
+            // Setup all textures
+            setupSingleTexture(this.cameraPlaneMain, this.canvasMain, this.ctxMain, 'Main Camera')
+                .then(tex => { this.textureMain = tex; });
+            setupSingleTexture(this.cameraPlaneLeft, this.canvasLeft, this.ctxLeft, 'Left Wrist')
+                .then(tex => { this.textureLeft = tex; });
+            setupSingleTexture(this.cameraPlaneRight, this.canvasRight, this.ctxRight, 'Right Wrist')
+                .then(tex => { this.textureRight = tex; });
+        },
+
+        connectWebSocket: function() {
+            const host = window.location.hostname;
+            const wsPort = 8442;
+            const wsUrl = `wss://${host}:${wsPort}`;
+
+            console.log('Connecting to WebSocket:', wsUrl);
+            const statusEl = document.getElementById('status');
+            statusEl.className = 'connecting';
+            statusEl.textContent = 'Connecting...';
+
+            try {
+                this.ws = new WebSocket(wsUrl);
+
+                this.ws.onopen = () => {
+                    console.log('WebSocket connected');
+                    statusEl.className = 'connected';
+                    statusEl.textContent = 'Connected';
+                };
+
+                this.ws.onclose = () => {
+                    console.log('WebSocket closed, reconnecting...');
+                    statusEl.className = 'disconnected';
+                    statusEl.textContent = 'Disconnected';
+                    this.ws = null;
+                    setTimeout(() => this.connectWebSocket(), 2000);
+                };
+
+                this.ws.onerror = (err) => {
+                    console.error('WebSocket error:', err);
+                    statusEl.className = 'disconnected';
+                    statusEl.textContent = 'Error';
+                };
+
+                this.ws.onmessage = (event) => {
+                    try {
+                        const msg = JSON.parse(event.data);
+                        if (msg.type === 'frame') {
+                            // Main camera
+                            if (msg.data) {
+                                this.updateCameraFrame(msg.data, 'main');
+                            }
+                            // Wrist cameras
+                            if (msg.wrist_left) {
+                                this.updateCameraFrame(msg.wrist_left, 'left');
+                            }
+                            if (msg.wrist_right) {
+                                this.updateCameraFrame(msg.wrist_right, 'right');
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Message parse error:', e);
+                    }
+                };
+            } catch (err) {
+                console.error('WebSocket connection failed:', err);
+                statusEl.className = 'disconnected';
+                statusEl.textContent = 'Failed';
+                setTimeout(() => this.connectWebSocket(), 3000);
+            }
+        },
+
+        updateCameraFrame: function(base64Data, camera) {
+            const dataUrl = 'data:image/jpeg;base64,' + base64Data;
+
+            if (camera === 'main') {
+                if (this.cameraPreview) this.cameraPreview.src = dataUrl;
+                this.tempImageMain.src = dataUrl;
+            } else if (camera === 'left') {
+                if (this.wristLeftPreview) this.wristLeftPreview.src = dataUrl;
+                this.tempImageLeft.src = dataUrl;
+            } else if (camera === 'right') {
+                if (this.wristRightPreview) this.wristRightPreview.src = dataUrl;
+                this.tempImageRight.src = dataUrl;
+            }
+        },
+
+        setupControllerEvents: function() {
+            // Thumbstick state
+            this.leftThumbstick = { x: 0, y: 0 };
+            this.rightThumbstick = { x: 0, y: 0 };
+
+            if (this.leftHand) {
+                this.leftHand.addEventListener('gripdown', () => {
+                    this.leftGripDown = true;
+                    console.log('Left grip down');
+                });
+                this.leftHand.addEventListener('gripup', () => {
+                    this.leftGripDown = false;
+                    console.log('Left grip up');
+                });
+                this.leftHand.addEventListener('triggerdown', () => {
+                    this.leftTriggerDown = true;
+                    console.log('Left trigger down');
+                });
+                this.leftHand.addEventListener('triggerup', () => {
+                    this.leftTriggerDown = false;
+                    console.log('Left trigger up');
+                });
+                // Thumbstick event
+                this.leftHand.addEventListener('thumbstickmoved', (evt) => {
+                    this.leftThumbstick = { x: evt.detail.x, y: evt.detail.y };
+                    console.log('Left thumbstick:', this.leftThumbstick);
+                });
+            }
+
+            if (this.rightHand) {
+                this.rightHand.addEventListener('gripdown', () => {
+                    this.rightGripDown = true;
+                    console.log('Right grip down');
+                });
+                this.rightHand.addEventListener('gripup', () => {
+                    this.rightGripDown = false;
+                    console.log('Right grip up');
+                });
+                this.rightHand.addEventListener('triggerdown', () => {
+                    this.rightTriggerDown = true;
+                    console.log('Right trigger down');
+                });
+                this.rightHand.addEventListener('triggerup', () => {
+                    this.rightTriggerDown = false;
+                    console.log('Right trigger up');
+                });
+                // Thumbstick event
+                this.rightHand.addEventListener('thumbstickmoved', (evt) => {
+                    this.rightThumbstick = { x: evt.detail.x, y: evt.detail.y };
+                    console.log('Right thumbstick:', this.rightThumbstick);
+                });
+            }
+        },
+
+        getControllerData: function(hand, handEntity, gripDown, triggerDown) {
+            const data = {
+                hand: hand,
+                position: null,
+                quaternion: null,
+                gripActive: gripDown,
+                trigger: triggerDown ? 1 : 0,
+                thumbstick: { x: 0, y: 0 }
+            };
+
+            if (!handEntity || !handEntity.object3D) return data;
+
+            // Get position and quaternion from A-Frame object3D
+            const pos = handEntity.object3D.position;
+            const quat = handEntity.object3D.quaternion;
+
+            data.position = { x: pos.x, y: pos.y, z: pos.z };
+            data.quaternion = { x: quat.x, y: quat.y, z: quat.z, w: quat.w };
+
+            // Get gamepad data via tracked-controls component
+            const trackedControls = handEntity.components['tracked-controls'];
+
+            // Debug: log once per hand when first accessing gamepad
+            if (!this[`_${hand}GamepadLogged`]) {
+                console.log(`${hand} trackedControls:`, !!trackedControls);
+                if (trackedControls) {
+                    console.log(`${hand} controller:`, !!trackedControls.controller);
+                    if (trackedControls.controller) {
+                        console.log(`${hand} gamepad:`, !!trackedControls.controller.gamepad);
+                        if (trackedControls.controller.gamepad) {
+                            const gp = trackedControls.controller.gamepad;
+                            console.log(`${hand} gamepad.axes:`, gp.axes ? Array.from(gp.axes) : 'none');
+                            console.log(`${hand} gamepad.buttons:`, gp.buttons ? gp.buttons.length : 'none');
+                            this[`_${hand}GamepadLogged`] = true;
+                        }
+                    }
+                }
+            }
+
+            if (trackedControls && trackedControls.controller) {
+                const gamepad = trackedControls.controller.gamepad;
+                if (gamepad) {
+                    // Read thumbstick directly from gamepad.axes
+                    // WebXR standard: axes[0] = X, axes[1] = Y (for each controller)
+                    // Some controllers may use axes[2], axes[3] for thumbstick
+                    if (gamepad.axes && gamepad.axes.length >= 2) {
+                        // Try axes[0], axes[1] first (standard)
+                        let tx = gamepad.axes[0] || 0;
+                        let ty = gamepad.axes[1] || 0;
+
+                        // If standard axes are zero, try axes[2], axes[3] (some controllers)
+                        if (Math.abs(tx) < 0.01 && Math.abs(ty) < 0.01 && gamepad.axes.length >= 4) {
+                            tx = gamepad.axes[2] || 0;
+                            ty = gamepad.axes[3] || 0;
+                        }
+
+                        data.thumbstick = { x: tx, y: ty };
+
+                        // Debug: log all axes when any movement detected
+                        if (Math.abs(tx) > 0.1 || Math.abs(ty) > 0.1) {
+                            console.log(`${hand} thumbstick:`, data.thumbstick, 'all axes:', Array.from(gamepad.axes));
+                        }
+                    } else if (gamepad.axes) {
+                        // Debug: log axes info
+                        console.log(`${hand} gamepad.axes.length:`, gamepad.axes.length);
+                    }
+
+                    // Quest 2 button mapping (WebXR Gamepad):
+                    // buttons[0] = trigger, buttons[1] = grip
+                    // buttons[3] = thumbstick press, buttons[4] = A/X, buttons[5] = B/Y
+                    if (gamepad.buttons && gamepad.buttons.length > 5) {
+                        const aPressed = gamepad.buttons[4]?.pressed || false;
+                        const bPressed = gamepad.buttons[5]?.pressed || false;
+                        data.buttons = {
+                            a: aPressed,
+                            b: bPressed
+                        };
+                    } else {
+                        // Fallback: check all possible button indices
+                        let foundA = false, foundB = false;
+                        if (gamepad.buttons) {
+                            for (let i = 0; i < gamepad.buttons.length; i++) {
+                                if (gamepad.buttons[i]?.pressed) {
+                                    if (i === 4) foundA = true;
+                                    if (i === 5) foundB = true;
+                                }
+                            }
+                        }
+                        data.buttons = { a: foundA, b: foundB };
+                    }
+                }
+            }
+
+            return data;
+        },
+
+        updateGamepadsFromXR: function() {
+            // Access XR session directly to get gamepads
+            const scene = this.el.sceneEl;
+            if (!scene || !scene.renderer || !scene.renderer.xr) return;
+
+            const xrSession = scene.renderer.xr.getSession();
+            if (!xrSession) return;
+
+            const inputSources = xrSession.inputSources;
+            if (!inputSources) return;
+
+            for (const source of inputSources) {
+                if (!source.gamepad) continue;
+
+                const handedness = source.handedness;
+                if (handedness === 'left') {
+                    this.xrLeftGamepad = source.gamepad;
+                    // Debug log once
+                    if (!this._xrLeftLogged) {
+                        console.log('XR Left gamepad found, axes:', Array.from(source.gamepad.axes));
+                        this._xrLeftLogged = true;
+                    }
+                } else if (handedness === 'right') {
+                    this.xrRightGamepad = source.gamepad;
+                    if (!this._xrRightLogged) {
+                        console.log('XR Right gamepad found, axes:', Array.from(source.gamepad.axes));
+                        this._xrRightLogged = true;
+                    }
+                }
+            }
+        },
+
+        tick: function() {
+            // Send controller data every frame
+            if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+            // Try to get gamepads from WebXR session directly
+            this.updateGamepadsFromXR();
+
+            const leftData = this.getControllerData('left', this.leftHand, this.leftGripDown, this.leftTriggerDown);
+            const rightData = this.getControllerData('right', this.rightHand, this.rightGripDown, this.rightTriggerDown);
+
+            // Override thumbstick from XR gamepads if available
+            if (this.xrLeftGamepad) {
+                const axes = this.xrLeftGamepad.axes;
+                if (axes && axes.length >= 4) {
+                    // Quest uses axes[2], axes[3] for thumbstick
+                    leftData.thumbstick = { x: axes[2] || 0, y: axes[3] || 0 };
+                } else if (axes && axes.length >= 2) {
+                    leftData.thumbstick = { x: axes[0] || 0, y: axes[1] || 0 };
+                }
+                // Debug log when thumbstick moved
+                if (Math.abs(leftData.thumbstick.x) > 0.1 || Math.abs(leftData.thumbstick.y) > 0.1) {
+                    if (this.frameCount % 10 === 0) {
+                        console.log('Left XR thumbstick:', leftData.thumbstick);
+                    }
+                }
+            }
+            if (this.xrRightGamepad) {
+                const axes = this.xrRightGamepad.axes;
+                if (axes && axes.length >= 4) {
+                    rightData.thumbstick = { x: axes[2] || 0, y: axes[3] || 0 };
+                } else if (axes && axes.length >= 2) {
+                    rightData.thumbstick = { x: axes[0] || 0, y: axes[1] || 0 };
+                }
+                if (Math.abs(rightData.thumbstick.x) > 0.1 || Math.abs(rightData.thumbstick.y) > 0.1) {
+                    if (this.frameCount % 10 === 0) {
+                        console.log('Right XR thumbstick:', rightData.thumbstick);
+                    }
+                }
+            }
+
+            // Send to server
+            const message = {
+                timestamp: Date.now(),
+                leftController: leftData,
+                rightController: rightData
+            };
+
+            try {
+                this.ws.send(JSON.stringify(message));
+            } catch (e) {
+                console.error('Send error:', e);
+            }
+
+            // Update debug info (throttled)
+            this.frameCount++;
+            if (this.frameCount % 30 === 0) {
+                const debugEl = document.getElementById('debug-info');
+                if (debugEl) {
+                    const leftPos = leftData.position ? `(${leftData.position.x.toFixed(2)}, ${leftData.position.y.toFixed(2)}, ${leftData.position.z.toFixed(2)})` : 'N/A';
+                    const rightPos = rightData.position ? `(${rightData.position.x.toFixed(2)}, ${rightData.position.y.toFixed(2)}, ${rightData.position.z.toFixed(2)})` : 'N/A';
+                    debugEl.textContent = `L: ${leftPos} | R: ${rightPos}`;
+                }
+            }
+        }
+    });
+
+    // Initialize when DOM ready
+    document.addEventListener('DOMContentLoaded', () => {
+        const scene = document.querySelector('a-scene');
+        const vrButton = document.getElementById('enter-vr-btn');
+
+        // Add component to scene
+        if (scene) {
+            if (scene.hasLoaded) {
+                scene.setAttribute('vr-teleop-stream', '');
+            } else {
+                scene.addEventListener('loaded', () => {
+                    scene.setAttribute('vr-teleop-stream', '');
+                });
+            }
+
+            // VR button handler
+            vrButton.addEventListener('click', () => {
+                scene.enterVR().catch(err => {
+                    console.error('Failed to enter VR:', err);
+                    alert('Failed to enter VR: ' + err.message);
+                });
+            });
+
+            // Update button state
+            scene.addEventListener('enter-vr', () => {
+                vrButton.textContent = 'In VR Mode';
+                vrButton.disabled = true;
+
+                // Keep session alive even when headset is removed
+                const xrSession = scene.renderer.xr.getSession();
+                if (xrSession) {
+                    xrSession.addEventListener('visibilitychange', (event) => {
+                        console.log('XR Session visibility:', event.session.visibilityState);
+                        // Don't end session - just log the visibility change
+                        // Controllers should still work even when 'hidden'
+                    });
+                    console.log('XR Session started - controllers will stay active even if headset removed');
+                }
+            });
+            scene.addEventListener('exit-vr', () => {
+                vrButton.textContent = 'Enter VR Mode';
+                vrButton.disabled = false;
+            });
+        }
+
+        // Check VR support
+        if (navigator.xr) {
+            navigator.xr.isSessionSupported('immersive-vr').then(supported => {
+                if (!supported) {
+                    vrButton.textContent = 'VR Not Supported';
+                    vrButton.disabled = true;
+                }
+            });
+        } else {
+            vrButton.textContent = 'WebXR Not Available';
+            vrButton.disabled = true;
+        }
+    });
+    </script>
+</body>
+</html>

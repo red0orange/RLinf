@@ -57,6 +57,7 @@ class SupportedModel(Enum):
     CNN_POLICY = ("cnn_policy", "embodied")
     FLOW_POLICY = ("flow_policy", "embodied")
     CMA_POLICY = ("cma", "embodied")
+    CRITIC = ("critic", "embodied")
 
     def __new__(cls, value, category):
         obj = object.__new__(cls)
@@ -82,6 +83,7 @@ SUPPORTED_TASK_TYPE = [
     "reasoning_eval",
     "coding_online_rl",
     "sft",
+    "critic",
 ]
 SUPPORTED_TRAINING_BACKENDS = ["megatron", "fsdp"]
 __all__ = ["build_config"]
@@ -783,8 +785,11 @@ def validate_embodied_cfg(cfg):
                     return "pd_joint_delta_pos"
                 elif robot == "panda-ee-dpos":
                     return "pd_ee_delta_pos"
-                elif robot == "panda-ee-target-dpos":  # for GSEnv
-                    return "pd_ee_target_delta_pose"
+                elif "aloha" in robot:
+                    # Custom AlohaMini agents expose joint-space controllers
+                    # (see `LibsMy/AlohaMini/maniskill/agents/...`), and RLinf
+                    # uses this mapping to set ManiSkill's `control_mode`.
+                    return "pd_joint_delta_pos"
                 elif "google_robot_static" in robot:
                     return "arm_pd_ee_delta_pose_align_interpolate_by_planner_gripper_pd_joint_target_delta_pos_interpolate_by_planner"
                 elif "widowx" in robot:

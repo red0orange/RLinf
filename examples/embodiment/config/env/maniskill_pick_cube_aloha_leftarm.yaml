@@ -1,0 +1,39 @@
+env_type: maniskill
+
+total_num_envs: null
+
+wrap_obs_mode: simple
+main_camera_name: cam_main
+auto_reset: False
+ignore_terminations: False
+use_rel_reward: False
+reward_mode: raw
+seed: 0
+group_size: 1
+use_fixed_reset_state_ids: False
+max_steps_per_rollout_epoch: 50
+max_episode_steps: 50 # max episode steps for truncation
+
+video_cfg:
+  save_video: False
+  info_on_video: True
+  video_base_dir: ${runner.logger.log_path}/video/train
+
+init_params:
+  # New env id registered by RLinf: rlinf/envs/maniskill/tasks/pick_cube_aloha_mini_so100_left_arm.py
+  id: "PickCubeAlohaMiniSO100LeftArm-v1"
+  # Reduce randomization on the robot initial qpos.
+  robot_init_qpos_noise: 0.0
+  cube_half_size_scale: 2.0
+  num_envs: null # will be set in ManiSkillEnv init
+  obs_mode: "state"
+  control_mode: None
+  reward_mode: dense
+  sim_backend: "gpu"
+  sim_config:
+    sim_freq: 100
+    control_freq: 20
+  max_episode_steps: ${env.train.max_episode_steps} # max episode steps for truncation
+  sensor_configs:
+    shader_pack: "default"
+  render_mode: all

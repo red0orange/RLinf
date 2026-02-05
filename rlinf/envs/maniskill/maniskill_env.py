@@ -149,9 +149,14 @@ class ManiskillEnv(gym.Env):
                     raw_obs, use_torch=True, device=self.device
                 )
 
-                main_images = sensor_data["base_camera"]["rgb"]
+                main_cam = getattr(self.cfg, "main_camera_name", "base_camera")
+                if main_cam not in sensor_data:
+                    raise KeyError(
+                        f"Requested main_camera_name={main_cam!r} not found in sensor_data keys={list(sensor_data.keys())}"
+                    )
+                main_images = sensor_data[main_cam]["rgb"]
                 sorted_images = OrderedDict(sorted(sensor_data.items()))
-                sorted_images.pop("base_camera")
+                sorted_images.pop(main_cam, None)
                 extra_view_images = (
                     torch.stack([v["rgb"] for v in sorted_images.values()], dim=1)
                     if sorted_images
@@ -186,8 +191,6 @@ class ManiskillEnv(gym.Env):
     def _calc_step_reward(self, reward, info):
         if getattr(self.cfg, "reward_mode", "default") == "raw":
             pass
-        elif getattr(self.cfg, "reward_mode", "default") == "only_success":
-            reward = info["success"] * 1.0
         else:
             reward = torch.zeros(self.num_envs, dtype=torch.float32).to(
                 self.env.unwrapped.device
@@ -271,19 +274,23 @@ class ManiskillEnv(gym.Env):
     def step(
         self, actions: Union[Array, dict] = None, auto_reset=True
     ) -> tuple[Array, Array, Array, Array, dict]:
-        raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)
+        raw_obs, _reward, terminations, truncations, infos = self.env.step(actions)    # @note reward, maniskill 内部先计算 reward
         extracted_obs = self._wrap_obs(raw_obs)
-        step_reward = self._calc_step_reward(_reward, infos)
+        step_reward = self._calc_step_reward(_reward, infos)  # @note reward, RLinf 再根据原始 reward 计算 最终 reward
 
         if self.video_cfg.save_video:
-            self.add_new_frames(infos=infos, rewards=step_reward)
+            # By default, record `env.render()` output, which is NOT the same as the
+            # policy's image observation (sensor_data[main_camera_name]).
+            # For debugging, users can set `video_cfg.use_main_images=true` to
+            # record the policy input image instead.
+            if getattr(self.video_cfg, "use_main_images", False):
+                self.add_new_frames_from_obs(extracted_obs)
+            else:
+                self.add_new_frames(infos=infos, rewards=step_reward)
 
         infos = self._record_metrics(step_reward, infos)
         if isinstance(terminations, bool):
             terminations = torch.tensor([terminations], device=self.device)
-        if isinstance(truncations, bool):
-            truncations = torch.tensor([truncations], device=self.device)
-            truncations = truncations.repeat(self.num_envs)
         if self.ignore_terminations:
             terminations[:] = False
             if self.record_metrics:
