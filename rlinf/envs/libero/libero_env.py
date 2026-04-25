@@ -212,6 +212,7 @@ class LiberoEnv(gym.Env):
 
         suite_name = self.cfg.task_suite_name.lower()
         suite_keyword = suite_name.replace("libero_", "").strip()
+        exact_plus_eval = self._is_libero_plus_exact_eval()
 
         task_descriptions = []
         if env_idx is None:
@@ -283,7 +284,7 @@ class LiberoEnv(gym.Env):
                         else:
                             final_path = self._generator.choice(all_candidates)
 
-            elif variant == "plus":
+            elif variant == "plus" and not exact_plus_eval:
                 plus_suffix = raw_suffix.replace(".bddl", "") if raw_suffix else None
                 if plus_suffix == "all":
                     clean_name = file_name.replace(".bddl", "")
@@ -353,11 +354,33 @@ class LiberoEnv(gym.Env):
         self.task_descriptions = task_descriptions
         return env_fn_params
 
+    def _is_libero_plus_exact_eval(self):
+        return (
+            get_libero_type() == "plus"
+            and bool(getattr(self.cfg, "is_eval", False))
+            and bool(self.cfg.get("libero_plus_exact_eval", False))
+        )
+
+    def _should_record_task_info(self):
+        return self._is_libero_plus_exact_eval() or bool(
+            self.cfg.get("save_raw_episode_results", False)
+        )
+
     def _compute_total_num_group_envs(self):
         self.total_num_group_envs = 0
         self.trial_id_bins = []
+        raw_num_trials_per_task = self.cfg.get("num_trials_per_task", None)
+        num_trials_per_task = (
+            1 if raw_num_trials_per_task is None else int(raw_num_trials_per_task)
+        )
+        if self._is_libero_plus_exact_eval() and num_trials_per_task <= 0:
+            raise ValueError("num_trials_per_task must be positive for exact eval.")
+
         for task_id in range(self.task_suite.get_num_tasks()):
-            task_num_trials = len(self.task_suite.get_task_init_states(task_id))
+            if self._is_libero_plus_exact_eval():
+                task_num_trials = num_trials_per_task
+            else:
+                task_num_trials = len(self.task_suite.get_task_init_states(task_id))
             self.trial_id_bins.append(task_num_trials)
             self.total_num_group_envs += task_num_trials
         self.cumsum_trial_id_bins = np.cumsum(self.trial_id_bins)
@@ -426,10 +449,19 @@ class LiberoEnv(gym.Env):
         if not self.cfg.is_eval:
             self._generator_ordered.shuffle(reset_state_ids)
 
-        # Ensure we have enough IDs for all processes by tiling if needed
-        if len(reset_state_ids) < self.total_num_processes:
-            repeats = (self.total_num_processes // len(reset_state_ids)) + 1
-            reset_state_ids = np.tile(reset_state_ids, repeats)
+        if self._is_libero_plus_exact_eval():
+            reset_batch_size = self.total_num_processes * self.num_group
+            remainder = len(reset_state_ids) % reset_batch_size
+            if remainder != 0:
+                pad_size = reset_batch_size - remainder
+                repeats = (pad_size // len(reset_state_ids)) + 1
+                padding = np.tile(reset_state_ids, repeats)[:pad_size]
+                reset_state_ids = np.concatenate([reset_state_ids, padding])
+        else:
+            # Ensure we have enough IDs for all processes by tiling if needed
+            if len(reset_state_ids) < self.total_num_processes:
+                repeats = (self.total_num_processes // len(reset_state_ids)) + 1
+                reset_state_ids = np.tile(reset_state_ids, repeats)
 
         valid_size = len(reset_state_ids) - (
             len(reset_state_ids) % self.total_num_processes
@@ -534,6 +566,9 @@ class LiberoEnv(gym.Env):
         episode_info["success_once"] = self.success_once.copy()
         episode_info["return"] = self.returns.copy()
         episode_info["episode_len"] = self.elapsed_steps.copy()
+        if self._should_record_task_info():
+            episode_info["task_id"] = self.task_ids.copy()
+            episode_info["trial_id"] = self.trial_ids.copy()
 
         # Use success episode_len for reward if already succeeded, else current elapsed
         episode_len_for_reward = np.where(

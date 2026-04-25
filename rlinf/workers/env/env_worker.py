@@ -13,6 +13,8 @@
 # limitations under the License.
 
 import asyncio
+import json
+import os
 from collections import defaultdict
 from typing import Any, Literal
 
@@ -120,6 +122,7 @@ class EnvWorker(Worker):
                 torch.zeros(self.eval_num_envs_per_stage, dtype=torch.bool)
                 for _ in range(self.stage_num)
             ]
+        self.raw_eval_results_path = self._get_raw_eval_results_path()
 
     def init_worker(self):
         self.dst_rank_map = self._setup_dst_rank_map()
@@ -136,6 +139,7 @@ class EnvWorker(Worker):
         )
 
         self.update_env_cfg()
+        self._init_raw_eval_results_file()
 
         if not self.only_eval:
             train_env_cls = get_env_cls(self.cfg.env.train.env_type, self.cfg.env.train)
@@ -154,6 +158,97 @@ class EnvWorker(Worker):
 
         if not self.only_eval:
             self._init_env()
+
+    def _get_raw_eval_results_path(self) -> str | None:
+        if not self.enable_eval:
+            return None
+        if not self.cfg.env.eval.get("save_raw_episode_results", False):
+            return None
+
+        raw_path = self.cfg.env.eval.get("raw_episode_results_path", None)
+        if raw_path is None:
+            raw_path = os.path.join(
+                self.cfg.runner.logger.log_path, "libero_plus_raw_eval.jsonl"
+            )
+        raw_path = os.fspath(raw_path)
+        root, ext = os.path.splitext(raw_path)
+        if ext:
+            return f"{root}.rank{self._rank}{ext}"
+        return f"{raw_path}.rank{self._rank}.jsonl"
+
+    def _init_raw_eval_results_file(self):
+        if self.raw_eval_results_path is None:
+            return
+        raw_dir = os.path.dirname(self.raw_eval_results_path)
+        if raw_dir:
+            os.makedirs(raw_dir, exist_ok=True)
+        with open(self.raw_eval_results_path, "w", encoding="utf-8"):
+            pass
+        self.log_info(
+            f"Raw eval episode results will be written to {self.raw_eval_results_path}"
+        )
+
+    @staticmethod
+    def _metric_item(values: Any, index: int) -> Any:
+        if values is None:
+            return None
+        if isinstance(values, torch.Tensor):
+            item = values.detach().cpu().reshape(-1)[index].item()
+        else:
+            item = np.asarray(values).reshape(-1)[index].item()
+
+        if isinstance(item, (bool, np.bool_)):
+            return bool(item)
+        if isinstance(item, (int, np.integer)):
+            return int(item)
+        if isinstance(item, (float, np.floating)):
+            return float(item)
+        return item
+
+    @classmethod
+    def _optional_metric_item(
+        cls, env_info: dict[str, Any], key: str, index: int
+    ) -> Any:
+        if key not in env_info:
+            return None
+        return cls._metric_item(env_info[key], index)
+
+    @staticmethod
+    def _metric_num_items(values: Any) -> int:
+        if isinstance(values, torch.Tensor):
+            return int(values.detach().cpu().reshape(-1).shape[0])
+        return int(np.asarray(values).reshape(-1).shape[0])
+
+    def _write_raw_eval_results(self, env_info: dict[str, Any], stage_id: int):
+        if self.raw_eval_results_path is None:
+            return
+        if "task_id" not in env_info:
+            return
+
+        num_records = self._metric_num_items(env_info["task_id"])
+        with open(self.raw_eval_results_path, "a", encoding="utf-8") as f:
+            for index in range(num_records):
+                success = self._optional_metric_item(env_info, "success_once", index)
+                trial_id = self._optional_metric_item(env_info, "trial_id", index)
+                record = {
+                    "suite": str(self.cfg.env.eval.task_suite_name),
+                    "rank": int(self._rank),
+                    "stage_id": int(stage_id),
+                    "task_id": int(self._metric_item(env_info["task_id"], index)),
+                    "trial_id": None if trial_id is None else int(trial_id),
+                    "success": None if success is None else int(bool(success)),
+                    "episode_len": self._optional_metric_item(
+                        env_info, "episode_len", index
+                    ),
+                    "return": self._optional_metric_item(env_info, "return", index),
+                    "reward": self._optional_metric_item(env_info, "reward", index),
+                }
+                f.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+    @staticmethod
+    def _drop_raw_eval_fields(env_info: dict[str, Any]):
+        env_info.pop("task_id", None)
+        env_info.pop("trial_id", None)
 
     def update_env_cfg(self):
         if not self.only_eval:
@@ -497,6 +592,8 @@ class EnvWorker(Worker):
             elif "episode" in infos:
                 for key in infos["episode"]:
                     env_info[key] = infos["episode"][key][newly_done].cpu()
+            self._write_raw_eval_results(env_info, stage_id)
+            self._drop_raw_eval_fields(env_info)
 
         env_output = EnvOutput(
             obs=extracted_obs,

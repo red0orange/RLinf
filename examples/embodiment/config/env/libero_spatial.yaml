@@ -15,6 +15,10 @@ reward_coef: 1.0
 # RLinf LiberoEnv specific settings
 reset_gripper_open: True
 is_eval: False
+libero_plus_exact_eval: False
+num_trials_per_task: null
+save_raw_episode_results: False
+raw_episode_results_path: null
 
 seed: 0
 group_size: 1
